@@ -193,7 +193,7 @@ def is_draft_good_enough(response, prompt):
     words = response.split()
     
     # Code checks
-    if "```
+    if "```" in response:
         if response.count("```") < 2:
             return False, "incomplete code block"
         if len(words) < 200:
