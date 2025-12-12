@@ -7,6 +7,9 @@ init(autoreset=True)
 
 OLLAMA_API = "http://localhost:11434/api/generate"
 
+# ===== CONVERSATION HISTORY =====
+conversation_history = []
+
 # ===== MENTAL HEALTH / SAFETY CONFIG =====
 
 MENTAL_HEALTH_KEYWORDS = [
@@ -125,14 +128,40 @@ def add_disclaimer_if_needed(prompt: str, response: str) -> str:
             return response.strip() + MEDICAL_DISCLAIMER
     return response
 
+def estimate_tokens(text):
+    """Rough estimate: 1 token ≈ 4 characters"""
+    return len(text) // 4
+
+def build_context():
+    """Build conversation context from history"""
+    if not conversation_history:
+        return ""
+    
+    context = "\n\nPrevious conversation:\n"
+    for entry in conversation_history[-3:]:  # Last 3 exchanges
+        context += f"User: {entry['user']}\nYou: {entry['assistant']}\n"
+    return context
+
 def call_model_with_confidence(model, prompt, num_tokens=150):
-    """Call model with safety instructions"""
+    """Call model with safety instructions and inquisitive tone"""
+    
+    # Build context from conversation history
+    context = build_context()
+    
     full_prompt = (
-        "You are an assistant. You MUST NOT diagnose medical or psychiatric conditions, "
+        "You are a curious, inquisitive assistant having a conversation. "
+        "You MUST NOT diagnose medical or psychiatric conditions, "
         "and you MUST NOT prescribe or suggest medication or dosages. "
         "You can provide general information and supportive guidance only.\n\n"
-        f"User Question: {prompt}\n\n"
-        "Please answer the question."
+        "Your tone should be:\n"
+        "- Curious and asking follow-up questions\n"
+        "- Conversational and engaging\n"
+        "- Collecting information to understand better\n"
+        "- Keeping responses similar length to the user's input\n\n"
+        f"{context}\n"
+        f"User: {prompt}\n\n"
+        "Respond in a curious, question-asking manner to learn more. "
+        "Ask follow-up questions naturally."
     )
     
     response = requests.post(OLLAMA_API, json={
@@ -141,7 +170,7 @@ def call_model_with_confidence(model, prompt, num_tokens=150):
         "stream": False,
         "options": {
             "num_predict": num_tokens,
-            "temperature": 0.3
+            "temperature": 0.7  # Higher temperature for more conversational tone
         }
     })
     return response.json()['response']
@@ -194,6 +223,13 @@ def smart_routing(prompt, target="phi3:3.8b", draft="phi:2.7b"):
     print(f"{'='*70}\n")
     print(f"📝 Your Question: {Fore.YELLOW}{prompt}{Style.RESET_ALL}\n")
     
+    # Calculate input tokens to match response length
+    input_tokens = estimate_tokens(prompt)
+    # Response should be similar length (with 20% buffer)
+    response_tokens = int(input_tokens * 1.2)
+    # Minimum 100 tokens, maximum 500 tokens
+    response_tokens = max(100, min(response_tokens, 500))
+    
     # ===== Step 0: Safety / mental health risk check =====
     risk_level = classify_risk(prompt)
     if risk_level != "no_risk":
@@ -205,8 +241,9 @@ def smart_routing(prompt, target="phi3:3.8b", draft="phi:2.7b"):
     
     # Step 1: Try draft model (Phi-2 2.7B)
     print(f"{Fore.CYAN}⚡ Trying DRAFT model ({draft} - Phi-2 2.7B)...{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}📊 Estimated tokens: Input={input_tokens}, Response={response_tokens}{Style.RESET_ALL}")
     start_draft = time.time()
-    draft_response = call_model_with_confidence(draft, prompt, num_tokens=250)
+    draft_response = call_model_with_confidence(draft, prompt, num_tokens=response_tokens)
     draft_time = time.time() - start_draft
     
     draft_response = add_disclaimer_if_needed(prompt, draft_response)
@@ -219,6 +256,11 @@ def smart_routing(prompt, target="phi3:3.8b", draft="phi:2.7b"):
     if is_good:
         print(f"{Fore.GREEN}✅ Draft response PASSED! ({reason}){Style.RESET_ALL}")
         print(f"⏱️  Total time: {draft_time:.2f}s")
+        # Add to conversation history
+        conversation_history.append({
+            "user": prompt,
+            "assistant": draft_response
+        })
         return draft_response, "draft", draft_time
     
     else:
@@ -226,7 +268,8 @@ def smart_routing(prompt, target="phi3:3.8b", draft="phi:2.7b"):
         print(f"{Fore.GREEN}🎯 Routing to TARGET model ({target} - Phi-3-mini 3.8B)...{Style.RESET_ALL}\n")
         
         start_target = time.time()
-        target_response = call_model_with_confidence(target, prompt, num_tokens=400)
+        # Give target model more tokens for better quality
+        target_response = call_model_with_confidence(target, prompt, num_tokens=int(response_tokens * 1.5))
         target_time = time.time() - start_target
         
         target_response = add_disclaimer_if_needed(prompt, target_response)
@@ -235,6 +278,12 @@ def smart_routing(prompt, target="phi3:3.8b", draft="phi:2.7b"):
         print(f"{Fore.WHITE}{target_response}{Style.RESET_ALL}\n")
         print(f"⏱️  Total time: {draft_time + target_time:.2f}s")
         
+        # Add to conversation history
+        conversation_history.append({
+            "user": prompt,
+            "assistant": target_response
+        })
+        
         return target_response, "target", draft_time + target_time
 
 if __name__ == "__main__":
@@ -242,17 +291,23 @@ if __name__ == "__main__":
     print("AI ASSISTANT WITH MENTAL HEALTH SAFETY LAYER (Phi Family)")
     print(f"{'='*70}{Style.RESET_ALL}\n")
     print(f"{Fore.CYAN}💡 Draft: Phi-2 (2.7B) | Target: Phi-3-mini (3.8B){Style.RESET_ALL}")
-    print(f"{Fore.CYAN}💡 Ask any question! (Type 'exit' to quit){Style.RESET_ALL}\n")
+    print(f"{Fore.CYAN}💡 Inquisitive conversational mode - I'll ask questions to learn more!{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}💡 Type 'exit' to quit | Type 'clear' to reset conversation{Style.RESET_ALL}\n")
     
     while True:
-        prompt = input(f"{Fore.YELLOW}Your question: {Style.RESET_ALL}")
+        prompt = input(f"{Fore.YELLOW}Your message: {Style.RESET_ALL}")
         
         if prompt.lower() in ['exit', 'quit', 'q']:
-            print(f"\n{Fore.GREEN}👋 Goodbye!{Style.RESET_ALL}")
+            print(f"\n{Fore.GREEN}👋 Goodbye! Great chatting with you!{Style.RESET_ALL}")
             break
         
+        if prompt.lower() == 'clear':
+            conversation_history.clear()
+            print(f"\n{Fore.GREEN}✨ Conversation history cleared!{Style.RESET_ALL}\n")
+            continue
+        
         if not prompt.strip():
-            print(f"{Fore.RED}Please enter a question!{Style.RESET_ALL}\n")
+            print(f"{Fore.RED}Please enter a message!{Style.RESET_ALL}\n")
             continue
         
         response, model_used, total_time = smart_routing(prompt)
@@ -260,4 +315,5 @@ if __name__ == "__main__":
         print(f"\n{Fore.MAGENTA}{'='*70}")
         print(f"RESULT:")
         print(f"{'='*70}{Style.RESET_ALL}")
-        print(f"🤖 Model: {Fore.GREEN if model_used == 'draft' else (Fore.RED if model_used == 'target' else Fore.CYAN)}{model_used.upper()}{Style.RESET_ALL} | ⏱️  {total_time:.2f}s\n")
+        print(f"🤖 Model: {Fore.GREEN if model_used == 'draft' else (Fore.RED if model_used == 'target' else Fore.CYAN)}{model_used.upper()}{Style.RESET_ALL} | ⏱️  {total_time:.2f}s")
+        print(f"💬 Conversation turns: {len(conversation_history)}\n")
